@@ -1,30 +1,325 @@
 (() => {
   'use strict';
+
   const $ = id => document.getElementById(id);
-  let shapes = [], paths = [], filename = '', gcode = '';
-  const ids = ['mode','units','origin','diameter','depth','stepdown','safez','feed','plunge','spindle','segments'];
-  const finite = n => Number.isFinite(n);
-  const fmt = n => (Math.abs(n) < 0.00005 ? 0 : n).toFixed(4).replace(/\.?0+$/,'');
-  const near = (a,b) => Math.hypot(a.x-b.x,a.y-b.y) < 1e-6;
-  const cross = (a,b) => a.x*b.y-a.y*b.x;
-  const sub = (a,b) => ({x:a.x-b.x,y:a.y-b.y});
-  function status(message,error=false){ $('status').textContent=message; $('status').className='status'+(error?' error':''); }
-  function groups(text){const lines=text.replace(/^\uFEFF/,'').split(/\r\n|\n|\r/), out=[];for(let i=0;i+1<lines.length;i+=2){const c=Number(lines[i].trim());if(Number.isInteger(c))out.push([c,lines[i+1].trim()]);}return out;}
-  function val(e,k,def=0){const hit=e.find(p=>p[0]===k);return hit?Number(hit[1]):def;}
-  function bulgePoints(a,b,bulge,tolerance){if(Math.abs(bulge)<1e-10)return[b];const chord=Math.hypot(b.x-a.x,b.y-a.y),theta=4*Math.atan(bulge),r=Math.abs(chord/(2*Math.sin(theta/2)));if(!finite(r)||r>1e9)return[b];const midpoint={x:(a.x+b.x)/2,y:(a.y+b.y)/2}, h=chord/(2*Math.tan(theta/2));const cx=midpoint.x-(b.y-a.y)/chord*h,cy=midpoint.y+(b.x-a.x)/chord*h,start=Math.atan2(a.y-cy,a.x-cx);const count=Math.min(720,Math.max(2,Math.ceil(Math.abs(theta)*r/Math.max(tolerance,0.05))));return Array.from({length:count},(_,i)=>({x:cx+r*Math.cos(start+theta*(i+1)/count),y:cy+r*Math.sin(start+theta*(i+1)/count)}));}
-  function poly(vertices,closed,tol){if(vertices.length<2)return null;const pts=[vertices[0]];for(let i=0;i<vertices.length-(closed?0:1);i++){let a=vertices[i],b=vertices[(i+1)%vertices.length];pts.push(...bulgePoints(a,b,a.bulge||0,tol));}if(closed&&near(pts[0],pts.at(-1)))pts.pop();return {points:pts,closed};}
-  function parseDXF(text,tol){const pairs=groups(text);if(!pairs.some(p=>p[0]===0&&p[1]==='SECTION'))throw Error('No parece un DXF ASCII válido. Los DXF binarios no son compatibles.');let inside=false,entity=null,records=[];for(const p of pairs){if(p[0]===0&&p[1]==='SECTION'){inside=false;entity=null;continue}if(p[0]===2&&p[1]==='ENTITIES'&&!inside){inside=true;continue}if(p[0]===0&&p[1]==='ENDSEC'){inside=false;entity=null;continue}if(!inside)continue;if(p[0]===0){entity={type:p[1],data:[]};records.push(entity)}else if(entity)entity.data.push(p)}const result=[];let legacy=null;for(const e of records){const d=e.data,t=e.type;if(t==='POLYLINE'){legacy={vertices:[],closed:(val(d,70)&1)!==0};continue}if(t==='VERTEX'&&legacy){legacy.vertices.push({x:val(d,10,NaN),y:val(d,20,NaN),bulge:val(d,42)});continue}if(t==='SEQEND'&&legacy){const p=poly(legacy.vertices,legacy.closed,tol);if(p)result.push(p);legacy=null;continue}if(t==='LINE'){const a={x:val(d,10,NaN),y:val(d,20,NaN)},b={x:val(d,11,NaN),y:val(d,21,NaN)};result.push({points:[a,b],closed:false});continue}if(t==='LWPOLYLINE'){const v=[];let current=null;for(const [code,value] of d){if(code===10){current={x:Number(value),y:NaN,bulge:0};v.push(current)}else if(current&&code===20)current.y=Number(value);else if(current&&code===42)current.bulge=Number(value)}const p=poly(v,(val(d,70)&1)!==0,tol);if(p)result.push(p);continue}if(t==='CIRCLE'||t==='ARC'){const cx=val(d,10,NaN),cy=val(d,20,NaN),r=val(d,40,NaN);if(!(r>0))continue;let start=t==='CIRCLE'?0:val(d,50)*Math.PI/180,end=t==='CIRCLE'?2*Math.PI:val(d,51)*Math.PI/180;if(t==='ARC')while(end<=start)end+=2*Math.PI;const sweep=end-start,n=Math.min(1440,Math.max(16,Math.ceil(sweep*r/Math.max(tol,0.05))));const pts=Array.from({length:t==='CIRCLE'?n:n+1},(_,i)=>({x:cx+r*Math.cos(start+sweep*i/n),y:cy+r*Math.sin(start+sweep*i/n)}));result.push({points:pts,closed:t==='CIRCLE'});}}
-    const clean=result.filter(s=>s.points.length>=2&&s.points.every(p=>finite(p.x)&&finite(p.y))&&(!s.closed||s.points.length>=3));if(!clean.length)throw Error('No encontré entidades 2D compatibles: LINE, LWPOLYLINE, POLYLINE, CIRCLE o ARC.');return clean;}
-  function intersect(a,b,c,d){const r=sub(b,a),s=sub(d,c),den=cross(r,s);if(Math.abs(den)<1e-9)return null;const t=cross(sub(c,a),s)/den,u=cross(sub(c,a),r)/den;return {x:a.x+t*r.x,y:a.y+t*r.y,t,u};}
-  function selfIntersects(points){const n=points.length;for(let i=0;i<n;i++)for(let j=i+2;j<n;j++){if(i===0&&j===n-1)continue;const q=intersect(points[i],points[(i+1)%n],points[j],points[(j+1)%n]);if(q&&q.t>1e-7&&q.t<1-1e-7&&q.u>1e-7&&q.u<1-1e-7)return true}return false;}
-  function area(p){let a=0;for(let i=0;i<p.length;i++)a+=cross(p[i],p[(i+1)%p.length]);return a/2;}
-  function offset(shape,distance){const p=shape.points,n=p.length;if(selfIntersects(p))throw Error('Hay un contorno con auto-intersecciones. Usa «Sobre línea» o corrige el DXF.');const sign=area(p)>=0?-1:1,dist=distance*sign,segments=[];for(let i=0;i<n;i++){const a=p[i],b=p[(i+1)%n],dx=b.x-a.x,dy=b.y-a.y,l=Math.hypot(dx,dy);if(l<1e-8)throw Error('El contorno contiene segmentos de longitud cero.');const nx=-dy/l*dist,ny=dx/l*dist;segments.push([{x:a.x+nx,y:a.y+ny},{x:b.x+nx,y:b.y+ny}]);}const out=[];for(let i=0;i<n;i++){const prev=segments[(i+n-1)%n],next=segments[i],q=intersect(prev[0],prev[1],next[0],next[1]);if(!q||Math.hypot(q.x-p[i].x,q.y-p[i].y)>Math.abs(distance)*8)throw Error('La compensación de herramienta falla en una esquina aguda. Usa «Sobre línea» o modifica el contorno.');out.push({x:q.x,y:q.y});}if(selfIntersects(out))throw Error('La trayectoria compensada se cruza. Usa «Sobre línea» o ajusta la geometría.');return {points:out,closed:true};}
-  function bounds(list){const ps=list.flatMap(s=>s.points),xs=ps.map(p=>p.x),ys=ps.map(p=>p.y);return {minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys)};}
-  function number(id){return Number($(id).value)}
-  function settings(){const keys=['diameter','depth','stepdown','safez','feed','plunge','spindle','segments'];for(const k of keys)if(!(number(k)>0))throw Error(`«${$(k).previousElementSibling.textContent}» debe ser mayor que cero.`);if(number('depth')>1000||number('stepdown')>1000||number('diameter')>1000)throw Error('Revisa diámetro y profundidades: el valor supera 1000 mm.');return Object.fromEntries(keys.map(k=>[k,number(k)]));}
-  function prepare(){const s=settings(),factor=$('units').value==='in'?25.4:1,base=shapes.map(v=>({closed:v.closed,points:v.points.map(p=>({x:p.x*factor,y:p.y*factor}))}));const b=bounds(base),ox=$('origin').value==='lower'?b.minX:$('origin').value==='center'?(b.minX+b.maxX)/2:0,oy=$('origin').value==='lower'?b.minY:$('origin').value==='center'?(b.minY+b.maxY)/2:0;const moved=base.map(v=>({closed:v.closed,points:v.points.map(p=>({x:p.x-ox,y:p.y-oy}))}));const mode=$('mode').value;if(mode!=='center'&&moved.some(v=>!v.closed))throw Error('La compensación interior/exterior requiere que todos los contornos estén cerrados.');const result=mode==='center'?moved:moved.map(v=>offset(v,(mode==='outside'?1:-1)*s.diameter/2));return {result,geometry:moved,settings:s};}
-  function generate(){try{const prep=prepare();paths=prep.result;const s=prep.settings,passCount=Math.ceil(s.depth/s.stepdown),out=['(DXF CNC - revisar antes de mecanizar)','G21','G90','G17','G94',`G0 Z${fmt(s.safez)}`,`M3 S${Math.round(s.spindle)}`];for(let pass=1;pass<=passCount;pass++){const z=-Math.min(pass*s.stepdown,s.depth);out.push(`(Pasada ${pass}/${passCount} Z${fmt(z)})`);for(const path of paths){const p=path.points[0];out.push(`G0 Z${fmt(s.safez)}`,`G0 X${fmt(p.x)} Y${fmt(p.y)}`,`G1 Z${fmt(z)} F${fmt(s.plunge)}`);for(const point of path.points.slice(1))out.push(`G1 X${fmt(point.x)} Y${fmt(point.y)} F${fmt(s.feed)}`);if(path.closed)out.push(`G1 X${fmt(p.x)} Y${fmt(p.y)} F${fmt(s.feed)}`);out.push(`G0 Z${fmt(s.safez)}`)}}out.push('M5');if($('return').checked)out.push('G0 X0 Y0');out.push('M2');gcode=out.join('\n')+'\n';$('code').textContent=gcode;$('download').disabled=false;$('passes').textContent=passCount;$('lines').textContent=out.length;status(`G-code generado: ${paths.length} trayectorias, ${passCount} pasadas. Verifica compensación, sujeción y Z0 antes de cortar.`);draw(prep.geometry,paths);}catch(e){gcode='';$('download').disabled=true;status(e.message,true);}}
-  function draw(geometry=shapes,toolpaths=[]){const c=$('canvas'),rect=c.getBoundingClientRect(),dpr=window.devicePixelRatio||1;c.width=Math.max(1,Math.round(rect.width*dpr));c.height=Math.max(1,Math.round(rect.height*dpr));const ctx=c.getContext('2d');ctx.scale(dpr,dpr);const all=[...geometry,...toolpaths];if(!all.length)return;const b=bounds(all),w=rect.width,h=rect.height,pad=35,scale=Math.min((w-2*pad)/Math.max(b.maxX-b.minX,1),(h-2*pad)/Math.max(b.maxY-b.minY,1)),cx=(b.minX+b.maxX)/2,cy=(b.minY+b.maxY)/2;const tr=p=>({x:w/2+(p.x-cx)*scale,y:h/2-(p.y-cy)*scale});const origin=tr({x:0,y:0});ctx.strokeStyle='#f6ba6f';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(origin.x-9,origin.y);ctx.lineTo(origin.x+9,origin.y);ctx.moveTo(origin.x,origin.y-9);ctx.lineTo(origin.x,origin.y+9);ctx.stroke();for(const [list,color,width] of [[geometry,'#8da7c7',1.5],[toolpaths,'#63d9bd',2.5]]){ctx.strokeStyle=color;ctx.lineWidth=width;for(const s of list){ctx.beginPath();s.points.forEach((p,i)=>{const q=tr(p);i?ctx.lineTo(q.x,q.y):ctx.moveTo(q.x,q.y)});if(s.closed)ctx.closePath();ctx.stroke()}}}
-  function load(text,name){try{filename=name;shapes=parseDXF(text,Math.max(number('segments')||0.5,0.05));paths=[];gcode='';$('filename').textContent=name;$('empty').hidden=true;$('contours').textContent=shapes.length;$('passes').textContent='0';$('lines').textContent='0';$('code').textContent='; Configura la operación y pulsa «Generar G-code».';$('generate').disabled=false;$('download').disabled=true;const factor=$('units').value==='in'?25.4:1,b=bounds(shapes);$('dimensions').textContent=`${fmt((b.maxX-b.minX)*factor)} × ${fmt((b.maxY-b.minY)*factor)} mm`;status(`${shapes.length} entidades compatibles cargadas. Revisa las unidades del DXF antes de generar.`);draw();}catch(e){shapes=[];paths=[];$('generate').disabled=true;$('download').disabled=true;$('empty').hidden=false;status(e.message,true);}}
-  $('file').addEventListener('change',async e=>{const file=e.target.files[0];if(file)load(await file.text(),file.name)});const drop=$('drop');drop.addEventListener('dragover',e=>{e.preventDefault();drop.classList.add('drag')});drop.addEventListener('dragleave',()=>drop.classList.remove('drag'));drop.addEventListener('drop',async e=>{e.preventDefault();drop.classList.remove('drag');const file=e.dataTransfer.files[0];if(file)load(await file.text(),file.name)});$('generate').addEventListener('click',generate);$('download').addEventListener('click',()=>{if(!gcode)return;const blob=new Blob([gcode],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=(filename.replace(/\.dxf$/i,'')||'corte')+'.nc';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)});for(const id of ids)$(id).addEventListener('change',()=>{if(!shapes.length)return;gcode='';paths=[];$('download').disabled=true;$('passes').textContent='0';$('lines').textContent='0';$('code').textContent='; Parámetros modificados. Vuelve a generar.';if(id==='units'){const b=bounds(shapes),f=$('units').value==='in'?25.4:1;$('dimensions').textContent=`${fmt((b.maxX-b.minX)*f)} × ${fmt((b.maxY-b.minY)*f)} mm`;}draw();status('Parámetros modificados. Genera de nuevo para actualizar la trayectoria.');});window.addEventListener('resize',()=>draw(paths.length?prepare().geometry:shapes,paths));
+  const colors = { center: '#e9c46a', inside: '#63d9bd', outside: '#64a9ff', drill: '#ec85b5', skip: '#788da7' };
+  const names = { center: 'Sobre línea', inside: 'Interior', outside: 'Exterior', drill: 'Perforar al centro', skip: 'No mecanizar' };
+  const controls = ['units', 'origin', 'diameter', 'depth', 'stepdown', 'safez', 'feed', 'plunge', 'spindle', 'segments', 'return'];
+  let shapes = [];
+  let rawDXF = '';
+  let filename = '';
+  let planResult = null;
+  let gcodeText = '';
+  let selectedId = null;
+  let canvasView = null;
+
+  function status(message, error = false) {
+    $('status').textContent = message;
+    $('status').className = error ? 'status error' : 'status';
+  }
+
+  function number(id) { return Number($(id).value); }
+
+  function settings() {
+    const result = {
+      units: $('units').value,
+      origin: $('origin').value,
+      diameter: number('diameter'),
+      depth: number('depth'),
+      stepdown: number('stepdown'),
+      safez: number('safez'),
+      feed: number('feed'),
+      plunge: number('plunge'),
+      spindle: number('spindle'),
+      resolution: number('segments'),
+      returnHome: $('return').checked
+    };
+    for (const key of ['diameter', 'depth', 'stepdown', 'safez', 'feed', 'plunge', 'spindle', 'resolution']) {
+      if (!Number.isFinite(result[key]) || result[key] <= 0) {
+        throw Error(`«${$(key === 'resolution' ? 'segments' : key).previousElementSibling.textContent}» debe ser mayor que cero.`);
+      }
+    }
+    if (result.depth > 1000 || result.stepdown > 1000 || result.diameter > 1000) {
+      throw Error('Revisa diámetro y profundidades: el valor supera 1000 mm.');
+    }
+    if (Math.ceil(result.depth / result.stepdown) > 250) {
+      throw Error('Demasiadas pasadas Z. Aumenta la profundidad por pasada.');
+    }
+    return result;
+  }
+
+  function invalidate(message = 'Parámetros modificados. Genera de nuevo para actualizar el G-code.') {
+    planResult = null;
+    gcodeText = '';
+    $('download').disabled = true;
+    $('passes').textContent = '0';
+    $('lines').textContent = '0';
+    $('code').textContent = '; Parámetros modificados. Vuelve a generar.';
+    if (shapes.length) status(message);
+    draw();
+  }
+
+  function optionsFor(shape) {
+    if (shape.type === 'POINT') return ['drill', 'skip'];
+    if (!shape.closed) return ['center', 'skip'];
+    if (shape.type === 'CIRCLE') return ['center', 'inside', 'outside', 'drill', 'skip'];
+    return ['center', 'inside', 'outside', 'skip'];
+  }
+
+  function shapeSummary(shape) {
+    const factor = $('units').value === 'in' ? 25.4 : 1;
+    const box = CamCore.bounds([shape]);
+    const size = shape.type === 'POINT' ? 'punto' : shape.type === 'CIRCLE'
+      ? `Ø ${CamCore.fmt(shape.radius * 2 * factor)} mm`
+      : `${CamCore.fmt((box.maxX - box.minX) * factor)} × ${CamCore.fmt((box.maxY - box.minY) * factor)} mm`;
+    return `${shape.type} · ${size} · capa ${shape.layer}`;
+  }
+
+  function renderEntities() {
+    const list = $('entity-list');
+    list.replaceChildren();
+    if (!shapes.length) {
+      const empty = document.createElement('div');
+      empty.className = 'entity-empty';
+      empty.textContent = 'Las entidades del DXF aparecerán aquí.';
+      list.append(empty);
+      return;
+    }
+    for (const shape of shapes) {
+      const row = document.createElement('div');
+      row.className = 'entity-row' + (selectedId === shape.id ? ' active' : '');
+      row.dataset.id = String(shape.id);
+      row.tabIndex = 0;
+      const head = document.createElement('div');
+      head.className = 'entity-head';
+      const title = document.createElement('strong');
+      const dot = document.createElement('i');
+      dot.className = 'op-dot';
+      dot.style.background = colors[shape.operation];
+      title.append(dot, document.createTextNode(`#${shape.id}`));
+      const detail = document.createElement('small');
+      detail.textContent = shapeSummary(shape);
+      detail.title = detail.textContent;
+      head.append(title, detail);
+      const select = document.createElement('select');
+      select.setAttribute('aria-label', `Operación de entidad ${shape.id}`);
+      for (const operation of optionsFor(shape)) {
+        const option = document.createElement('option');
+        option.value = operation;
+        option.textContent = names[operation];
+        select.append(option);
+      }
+      select.value = shape.operation;
+      select.addEventListener('change', () => {
+        shape.operation = select.value;
+        selectedId = shape.id;
+        renderEntities();
+        invalidate(`Entidad #${shape.id}: ${names[shape.operation]}. Genera de nuevo para actualizar el G-code.`);
+      });
+      row.addEventListener('click', event => { if (event.target !== select) selectShape(shape.id); });
+      row.addEventListener('keydown', event => {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectShape(shape.id); }
+      });
+      row.append(head, select);
+      list.append(row);
+    }
+  }
+
+  function selectShape(id) {
+    selectedId = id;
+    renderEntities();
+    const row = [...$('entity-list').children].find(node => Number(node.dataset.id) === id);
+    row?.scrollIntoView?.({ block: 'nearest' });
+    draw();
+  }
+
+  function updateDimensions() {
+    if (!shapes.length) { $('dimensions').textContent = '—'; return; }
+    const factor = $('units').value === 'in' ? 25.4 : 1;
+    const box = CamCore.bounds(shapes);
+    $('dimensions').textContent = `${CamCore.fmt((box.maxX - box.minX) * factor)} × ${CamCore.fmt((box.maxY - box.minY) * factor)} mm`;
+  }
+
+  function load(text, name, preserveOperations = false) {
+    try {
+      const old = preserveOperations ? new Map(shapes.map(shape => [shape.id, shape.operation])) : new Map();
+      const next = CamCore.parseDXF(text, Math.max(number('segments') || 0.5, 0.05));
+      for (const shape of next) if (old.has(shape.id)) shape.operation = old.get(shape.id);
+      shapes = next;
+      rawDXF = text;
+      filename = name;
+      selectedId = null;
+      $('filename').textContent = name;
+      $('empty').hidden = true;
+      $('contours').textContent = String(shapes.length);
+      $('generate').disabled = false;
+      renderEntities();
+      updateDimensions();
+      invalidate(`${shapes.length} entidades cargadas. Asigna una operación a cada una y revisa las unidades del DXF.`);
+    } catch (error) {
+      shapes = [];
+      rawDXF = '';
+      selectedId = null;
+      $('generate').disabled = true;
+      $('download').disabled = true;
+      $('empty').hidden = false;
+      $('contours').textContent = '0';
+      renderEntities();
+      status(error.message, true);
+      draw();
+    }
+  }
+
+  function generate() {
+    try {
+      const config = settings();
+      const prepared = CamCore.plan(shapes, config);
+      const result = CamCore.gcode(prepared, config);
+      planResult = prepared;
+      gcodeText = result.text;
+      $('code').textContent = gcodeText;
+      $('download').disabled = false;
+      $('passes').textContent = String(result.passes);
+      $('lines').textContent = String(result.lineCount);
+      status(`${prepared.paths.length} trayectorias generadas. Perforaciones e interiores primero; exteriores al final. Verifica el G-code antes de cortar.`);
+      draw();
+    } catch (error) {
+      planResult = null;
+      gcodeText = '';
+      $('download').disabled = true;
+      $('code').textContent = '; No se generó G-code. Corrige la operación indicada.';
+      status(error.message, true);
+      draw();
+    }
+  }
+
+  function previewGeometry() {
+    if (planResult) return planResult.geometry;
+    if (!shapes.length) return [];
+    const unit = $('units').value === 'in' ? 25.4 : 1;
+    const scaled = shapes.map(shape => ({ ...shape, points: shape.points.map(point => ({ x: point.x * unit, y: point.y * unit })) }));
+    const box = CamCore.bounds(scaled);
+    const ox = $('origin').value === 'lower' ? box.minX : $('origin').value === 'center' ? (box.minX + box.maxX) / 2 : 0;
+    const oy = $('origin').value === 'lower' ? box.minY : $('origin').value === 'center' ? (box.minY + box.maxY) / 2 : 0;
+    return scaled.map(shape => ({ ...shape, points: shape.points.map(point => ({ x: point.x - ox, y: point.y - oy })) }));
+  }
+
+  function draw() {
+    const canvas = $('canvas');
+    const rectangle = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(rectangle.width * dpr));
+    canvas.height = Math.max(1, Math.round(rectangle.height * dpr));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+    const geometry = previewGeometry();
+    const paths = planResult?.paths || [];
+    canvasView = null;
+    if (!geometry.length) return;
+    const box = CamCore.bounds([...geometry, ...paths]);
+    const width = rectangle.width, height = rectangle.height, pad = 40;
+    const scale = Math.min((width - pad * 2) / Math.max(box.maxX - box.minX, 1), (height - pad * 2) / Math.max(box.maxY - box.minY, 1));
+    const cx = (box.minX + box.maxX) / 2, cy = (box.minY + box.maxY) / 2;
+    const project = point => ({ x: width / 2 + (point.x - cx) * scale, y: height / 2 - (point.y - cy) * scale });
+    canvasView = { geometry, project };
+    const origin = project({ x: 0, y: 0 });
+    ctx.strokeStyle = '#f6ba6f';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(origin.x - 9, origin.y); ctx.lineTo(origin.x + 9, origin.y);
+    ctx.moveTo(origin.x, origin.y - 9); ctx.lineTo(origin.x, origin.y + 9);
+    ctx.stroke();
+    for (const shape of geometry) {
+      ctx.strokeStyle = shape.id === selectedId ? '#ffffff' : '#8da7c7';
+      ctx.lineWidth = shape.id === selectedId ? 2.5 : 1.5;
+      ctx.beginPath();
+      shape.points.forEach((point, i) => {
+        const p = project(point);
+        if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+      });
+      if (shape.closed) ctx.closePath();
+      if (shape.type === 'POINT') {
+        const p = project(shape.points[0]);
+        ctx.moveTo(p.x - 4, p.y); ctx.lineTo(p.x + 4, p.y);
+        ctx.moveTo(p.x, p.y - 4); ctx.lineTo(p.x, p.y + 4);
+      }
+      ctx.stroke();
+      const label = project(shape.points[0]);
+      ctx.fillStyle = '#dbe7f5';
+      ctx.font = '12px system-ui';
+      ctx.fillText?.(`#${shape.id}`, label.x + 5, label.y - 7);
+    }
+    for (const path of paths) {
+      ctx.strokeStyle = colors[path.operation];
+      ctx.lineWidth = path.id === selectedId ? 3.5 : 2.5;
+      ctx.beginPath();
+      if (path.operation === 'drill') {
+        const p = project(path.points[0]);
+        ctx.arc(p.x, p.y, 6, 0, 2 * Math.PI);
+      } else {
+        path.points.forEach((point, i) => {
+          const p = project(point);
+          if (i) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+        });
+        if (path.closed) ctx.closePath();
+      }
+      ctx.stroke();
+    }
+  }
+
+  function distanceToSegment(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy);
+  }
+
+  $('canvas').addEventListener('click', event => {
+    if (!canvasView) return;
+    const rect = $('canvas').getBoundingClientRect();
+    const click = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    let best = { id: null, distance: 14 };
+    for (const shape of canvasView.geometry) {
+      const points = shape.points.map(canvasView.project);
+      let distance = shape.type === 'POINT' ? Math.hypot(click.x - points[0].x, click.y - points[0].y) : Infinity;
+      for (let i = 0; i < points.length - 1; i++) distance = Math.min(distance, distanceToSegment(click, points[i], points[i + 1]));
+      if (shape.closed) distance = Math.min(distance, distanceToSegment(click, points.at(-1), points[0]));
+      if (distance < best.distance) best = { id: shape.id, distance };
+    }
+    if (best.id != null) selectShape(best.id);
+  });
+
+  $('file').addEventListener('change', async event => {
+    const file = event.target.files?.[0];
+    if (file) load(await file.text(), file.name);
+  });
+  const drop = $('drop');
+  drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', async event => {
+    event.preventDefault();
+    drop.classList.remove('drag');
+    const file = event.dataTransfer.files?.[0];
+    if (file) load(await file.text(), file.name);
+  });
+  $('generate').addEventListener('click', generate);
+  $('download').addEventListener('click', () => {
+    if (!gcodeText) return;
+    const url = URL.createObjectURL(new Blob([gcodeText], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = (filename.replace(/\.dxf$/i, '') || 'corte') + '.nc';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  for (const id of controls) $(id).addEventListener('change', () => {
+    if (!shapes.length) return;
+    if (id === 'segments' && rawDXF) {
+      load(rawDXF, filename, true);
+      return;
+    }
+    if (id === 'units') { updateDimensions(); renderEntities(); }
+    invalidate();
+  });
+  window.addEventListener('resize', draw);
 })();
