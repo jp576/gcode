@@ -328,7 +328,7 @@
     for (const path of paths) {
       const source = byId.get(path.id);
       path.depth = source.depth;
-      path.stepdown = source.stepdown;
+      path.passCount = source.passCount;
     }
     return { geometry, paths };
   }
@@ -344,14 +344,15 @@
     ];
     for (const path of paths) {
       const depth = path.depth == null ? settings.depth : path.depth;
-      const stepdown = path.stepdown == null ? settings.stepdown : path.stepdown;
-      if (!(depth > 0) || !(stepdown > 0)) throw Error('Entidad #' + path.id + ': profundidad y paso Z deben ser mayores que cero.');
-      const passes = Math.ceil(depth / stepdown);
-      if (passes > 250) throw Error('Entidad #' + path.id + ': demasiadas pasadas Z.');
+      const passCount = path.passCount == null ? settings.passCount : path.passCount;
+      if (!(depth > 0) || !Number.isInteger(passCount) || passCount < 1 || passCount > 250) {
+        throw Error('Entidad #' + path.id + ': profundidad positiva y número de pasadas entero entre 1 y 250 requeridos.');
+      }
+      const passes = passCount;
       maxPasses = Math.max(maxPasses, passes);
       output.push(`(Entidad ${path.id}: ${path.operation})`);
       for (let pass = 1; pass <= passes; pass++) {
-        const z = -Math.min(pass * stepdown, depth);
+        const z = -(pass === passes ? depth : depth * pass / passes);
         const start = path.points[0];
         output.push(`(Pasada ${pass}/${passes} Z${fmt(z)})`);
         output.push(`G0 Z${fmt(settings.safez)}`);

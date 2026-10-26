@@ -4,7 +4,7 @@ const Cam = require('../cam.js');
 
 const rectangle = (x, y, w, h, layer) => `0\nLWPOLYLINE\n8\n${layer}\n90\n4\n70\n1\n10\n${x}\n20\n${y}\n10\n${x + w}\n20\n${y}\n10\n${x + w}\n20\n${y + h}\n10\n${x}\n20\n${y + h}\n`;
 const dxf = `0\nSECTION\n2\nENTITIES\n${rectangle(0, 0, 100, 60, 'EXTERIOR')}${rectangle(20, 20, 20, 10, 'ENCAJE')}0\nCIRCLE\n8\nTALADRO\n10\n60\n20\n30\n40\n1.5\n0\nENDSEC\n0\nEOF\n`;
-const settings = { units: 'mm', origin: 'lower', diameter: 3, depth: 6, stepdown: 2, safez: 5, feed: 800, plunge: 200, spindle: 18000, returnHome: false };
+const settings = { units: 'mm', origin: 'lower', diameter: 3, depth: 6, passCount: 3, safez: 5, feed: 800, plunge: 200, spindle: 18000, returnHome: false };
 
 test('combines exterior, interior and drilling; finishes exterior last', () => {
   const shapes = Cam.parseDXF(dxf);
@@ -65,13 +65,29 @@ test('individual cut depths override the shared values', () => {
   const shapes = Cam.parseDXF(dxf);
   shapes[0].operation = 'outside';
   shapes[0].depth = 18.5;
-  shapes[0].stepdown = 9.25;
+  shapes[0].passCount = 2;
   shapes[1].operation = 'inside';
   shapes[1].depth = 13;
-  shapes[1].stepdown = 6.5;
+  shapes[1].passCount = 2;
   shapes[2].operation = 'skip';
   const output = Cam.gcode(Cam.plan(shapes, settings), settings).text;
   assert.match(output, /G1 Z-13 F200/);
   assert.match(output, /G1 Z-18\.5 F200/);
   assert.ok(output.indexOf('(Entidad 2: inside)') < output.indexOf('(Entidad 1: outside)'));
+});
+
+test('divides final depth evenly by the selected number of passes without overshoot', () => {
+  const shapes = Cam.parseDXF(dxf);
+  shapes[0].operation = 'outside';
+  shapes[0].depth = 18.5;
+  shapes[0].passCount = 3;
+  shapes[1].operation = 'skip';
+  shapes[2].operation = 'skip';
+  const output = Cam.gcode(Cam.plan(shapes, settings), settings);
+  const levels = [...output.text.matchAll(/^G1 Z(-?\d+(?:\.\d+)?)/gm)].map(match => Number(match[1]));
+  assert.deepEqual(levels, [-6.1667, -12.3333, -18.5]);
+  assert.ok(levels.every(level => level <= 0 && level >= -18.5));
+  assert.equal(output.passes, 3);
+  shapes[0].passCount = 2.5;
+  assert.throws(() => Cam.gcode(Cam.plan(shapes, settings), settings), /número de pasadas entero/);
 });

@@ -4,7 +4,7 @@
   const $ = id => document.getElementById(id);
   const colors = { center: '#e9c46a', inside: '#63d9bd', outside: '#64a9ff', drill: '#ec85b5', skip: '#788da7' };
   const names = { center: 'Sobre línea', inside: 'Interior', outside: 'Exterior', drill: 'Perforar al centro', skip: 'No mecanizar' };
-  const controls = ['units', 'origin', 'diameter', 'depth', 'stepdown', 'safez', 'feed', 'plunge', 'spindle', 'segments', 'return'];
+  const controls = ['units', 'origin', 'diameter', 'depth', 'passCount', 'safez', 'feed', 'plunge', 'spindle', 'segments', 'return'];
   let shapes = [];
   let rawDXF = '';
   let filename = '';
@@ -26,7 +26,7 @@
       origin: $('origin').value,
       diameter: number('diameter'),
       depth: number('depth'),
-      stepdown: number('stepdown'),
+      passCount: number('passCount'),
       safez: number('safez'),
       feed: number('feed'),
       plunge: number('plunge'),
@@ -34,16 +34,16 @@
       resolution: number('segments'),
       returnHome: $('return').checked
     };
-    for (const key of ['diameter', 'depth', 'stepdown', 'safez', 'feed', 'plunge', 'spindle', 'resolution']) {
+    for (const key of ['diameter', 'depth', 'passCount', 'safez', 'feed', 'plunge', 'spindle', 'resolution']) {
       if (!Number.isFinite(result[key]) || result[key] <= 0) {
         throw Error(`«${$(key === 'resolution' ? 'segments' : key).previousElementSibling.textContent}» debe ser mayor que cero.`);
       }
     }
-    if (result.depth > 1000 || result.stepdown > 1000 || result.diameter > 1000) {
+    if (result.depth > 1000 || result.diameter > 1000) {
       throw Error('Revisa diámetro y profundidades: el valor supera 1000 mm.');
     }
-    if (Math.ceil(result.depth / result.stepdown) > 250) {
-      throw Error('Demasiadas pasadas Z. Aumenta la profundidad por pasada.');
+    if (!Number.isInteger(result.passCount) || result.passCount > 250) {
+      throw Error('El número de pasadas debe ser un entero entre 1 y 250.');
     }
     return result;
   }
@@ -122,20 +122,20 @@
       });
       const parameters = document.createElement('div');
       parameters.className = 'entity-params';
-      for (const [key, label] of [['depth', 'Prof. final (mm)'], ['stepdown', 'Paso Z (mm)']]) {
+      for (const [key, label] of [['depth', 'Prof. final (mm)'], ['passCount', 'N.º de pasadas']]) {
         const wrapper = document.createElement('label');
         wrapper.textContent = label;
         const input = document.createElement('input');
         input.type = 'number';
-        input.min = '0.01';
-        input.step = '0.1';
+        input.min = key === 'passCount' ? '1' : '0.01';
+        input.step = key === 'passCount' ? '1' : '0.1';
         input.placeholder = String(number(key));
         input.value = shape[key] ?? '';
         input.setAttribute('aria-label', label + ' de entidad ' + shape.id);
         input.addEventListener('change', () => {
           shape[key] = input.value.trim() === '' ? null : Number(input.value);
           selectedId = shape.id;
-          invalidate('Entidad #' + shape.id + ': profundidad modificada. Genera de nuevo.');
+          invalidate('Entidad #' + shape.id + ': profundidad o número de pasadas modificado. Genera de nuevo.');
         });
         wrapper.append(input);
         parameters.append(wrapper);
@@ -339,7 +339,7 @@
       return;
     }
     if (id === 'units') updateDimensions();
-    if (id === 'units' || id === 'depth' || id === 'stepdown') renderEntities();
+    if (id === 'units' || id === 'depth' || id === 'passCount') renderEntities();
     invalidate();
   });
   window.addEventListener('resize', draw);

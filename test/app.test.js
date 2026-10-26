@@ -34,10 +34,10 @@ const rectangle = (x, y, w, h) => `0\nLWPOLYLINE\n90\n4\n70\n1\n10\n${x}\n20\n${
 const sample = `0\nSECTION\n2\nENTITIES\n${rectangle(0, 0, 100, 60)}${rectangle(20, 20, 20, 10)}0\nCIRCLE\n10\n60\n20\n30\n40\n1.5\n0\nENDSEC\n0\nEOF\n`;
 
 test('UI assigns a different operation to each entity and downloads mixed G-code', async () => {
-  const ids = ['drop','file','entity-list','units','origin','diameter','depth','stepdown','safez','feed','plunge','spindle','segments','return','generate','download','canvas','empty','filename','contours','passes','dimensions','lines','status','code'];
+  const ids = ['drop','file','entity-list','units','origin','diameter','depth','passCount','safez','feed','plunge','spindle','segments','return','generate','download','canvas','empty','filename','contours','passes','dimensions','lines','status','code'];
   const elements = Object.fromEntries(ids.map(id => [id, new Element(id)]));
   Object.assign(elements, { });
-  const values = { units: 'mm', origin: 'lower', diameter: '3', depth: '6', stepdown: '2', safez: '5', feed: '800', plunge: '200', spindle: '18000', segments: '0.5' };
+  const values = { units: 'mm', origin: 'lower', diameter: '3', depth: '6', passCount: '3', safez: '5', feed: '800', plunge: '200', spindle: '18000', segments: '0.5' };
   for (const [id, value] of Object.entries(values)) elements[id].value = value;
   const document = {
     getElementById: id => elements[id],
