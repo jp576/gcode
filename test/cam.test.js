@@ -41,3 +41,37 @@ test('POINT can be drilled and open lines cannot receive contour compensation', 
   shapes[1].operation = 'outside';
   assert.throws(() => Cam.plan(shapes, settings), /Entidad #2.*contorno cerrado/);
 });
+
+test('rational quadratic SPLINE is sampled and offset accurately', () => {
+  const weights = [1, Math.SQRT1_2, 1, Math.SQRT1_2, 1, Math.SQRT1_2, 1, Math.SQRT1_2, 1];
+  const controls = [[10,0],[10,10],[0,10],[-10,10],[-10,0],[-10,-10],[0,-10],[10,-10],[10,0]];
+  const knots = [0,0,0,1,1,2,2,3,3,4,4,4];
+  const entity = ['0','SPLINE','70','5','71','2','72','12','73','9','74','0',
+    ...knots.flatMap(k => ['40',String(k)]),
+    ...controls.flatMap(([x,y], i) => ['10',String(x),'20',String(y),'41',String(weights[i])])].join('\n');
+  const dxf = '0\nSECTION\n2\nENTITIES\n' + entity + '\n0\nENDSEC\n0\nEOF\n';
+  const shapes = Cam.parseDXF(dxf, 0.2);
+  assert.equal(shapes.length, 1);
+  assert.equal(shapes[0].closed, true);
+  assert.ok(shapes[0].points.length > 12);
+  const box = Cam.bounds(shapes);
+  assert.ok(Math.abs(box.minX + 10) < 0.01 && Math.abs(box.maxX - 10) < 0.01);
+  shapes[0].operation = 'inside';
+  const inside = Cam.bounds(Cam.plan(shapes, { ...settings, origin: 'original', diameter: 4, resolution: 0.2 }).paths);
+  assert.ok(Math.abs(inside.minX + 8) < 0.15 && Math.abs(inside.maxX - 8) < 0.15);
+});
+
+test('individual cut depths override the shared values', () => {
+  const shapes = Cam.parseDXF(dxf);
+  shapes[0].operation = 'outside';
+  shapes[0].depth = 18.5;
+  shapes[0].stepdown = 9.25;
+  shapes[1].operation = 'inside';
+  shapes[1].depth = 13;
+  shapes[1].stepdown = 6.5;
+  shapes[2].operation = 'skip';
+  const output = Cam.gcode(Cam.plan(shapes, settings), settings).text;
+  assert.match(output, /G1 Z-13 F200/);
+  assert.match(output, /G1 Z-18\.5 F200/);
+  assert.ok(output.indexOf('(Entidad 2: inside)') < output.indexOf('(Entidad 1: outside)'));
+});

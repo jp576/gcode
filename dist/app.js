@@ -72,7 +72,7 @@
     const size = shape.type === 'POINT' ? 'punto' : shape.type === 'CIRCLE'
       ? `Ø ${CamCore.fmt(shape.radius * 2 * factor)} mm`
       : `${CamCore.fmt((box.maxX - box.minX) * factor)} × ${CamCore.fmt((box.maxY - box.minY) * factor)} mm`;
-    return `${shape.type} · ${size} · capa ${shape.layer}`;
+    return `${shape.reference ? "Marco de plancha · " : ""}${shape.type} · ${size} · capa ${shape.layer}`;
   }
 
   function renderEntities() {
@@ -120,7 +120,27 @@
       row.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectShape(shape.id); }
       });
-      row.append(head, select);
+      const parameters = document.createElement('div');
+      parameters.className = 'entity-params';
+      for (const [key, label] of [['depth', 'Prof. final (mm)'], ['stepdown', 'Paso Z (mm)']]) {
+        const wrapper = document.createElement('label');
+        wrapper.textContent = label;
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.min = '0.01';
+        input.step = '0.1';
+        input.placeholder = String(number(key));
+        input.value = shape[key] ?? '';
+        input.setAttribute('aria-label', label + ' de entidad ' + shape.id);
+        input.addEventListener('change', () => {
+          shape[key] = input.value.trim() === '' ? null : Number(input.value);
+          selectedId = shape.id;
+          invalidate('Entidad #' + shape.id + ': profundidad modificada. Genera de nuevo.');
+        });
+        wrapper.append(input);
+        parameters.append(wrapper);
+      }
+      row.append(head, select, parameters);
       list.append(row);
     }
   }
@@ -181,7 +201,7 @@
       $('download').disabled = false;
       $('passes').textContent = String(result.passes);
       $('lines').textContent = String(result.lineCount);
-      status(`${prepared.paths.length} trayectorias generadas. Perforaciones e interiores primero; exteriores al final. Verifica el G-code antes de cortar.`);
+      status(`${prepared.paths.length} trayectorias generadas. Interiores primero y exteriores al final. Los exteriores no tienen pestañas: asegura las piezas y verifica el G-code antes de cortar.`);
       draw();
     } catch (error) {
       planResult = null;
@@ -318,7 +338,8 @@
       load(rawDXF, filename, true);
       return;
     }
-    if (id === 'units') { updateDimensions(); renderEntities(); }
+    if (id === 'units') updateDimensions();
+    if (id === 'units' || id === 'depth' || id === 'stepdown') renderEntities();
     invalidate();
   });
   window.addEventListener('resize', draw);

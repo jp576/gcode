@@ -54,8 +54,16 @@ test('UI assigns a different operation to each entity and downloads mixed G-code
     select.value = operation;
     select.handlers.change();
   }
+  const outerDepth = elements['entity-list'].children[0].children[2].children[0].children[0];
+  outerDepth.value = '18.5';
+  outerDepth.handlers.change();
+  const innerDepth = elements['entity-list'].children[1].children[2].children[0].children[0];
+  innerDepth.value = '13';
+  innerDepth.handlers.change();
   elements.generate.handlers.click();
   assert.equal(elements.download.disabled, false);
+  assert.match(elements.code.textContent, /G1 Z-18\.5 F200/);
+  assert.match(elements.code.textContent, /G1 Z-13 F200/);
   const text = elements.code.textContent;
   assert.ok(text.indexOf('(Entidad 3: drill)') < text.indexOf('(Entidad 2: inside)'));
   assert.ok(text.indexOf('(Entidad 2: inside)') < text.indexOf('(Entidad 1: outside)'));

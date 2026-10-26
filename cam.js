@@ -1,9 +1,10 @@
 /* DXF geometry and GRBL toolpath generation. No DOM or network dependencies. */
 (function (root, factory) {
-  const core = factory();
+  const clipper = typeof module === 'object' && module.exports ? require('./vendor/clipper.js') : root.ClipperLib;
+  const core = factory(clipper);
   if (typeof module === 'object' && module.exports) module.exports = core;
   else root.CamCore = core;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (ClipperLib) {
   'use strict';
 
   const finite = Number.isFinite;
@@ -52,6 +53,68 @@
     }
     if (closed && near(points[0], points.at(-1))) points.pop();
     return { points, closed };
+  }
+
+
+  function spline(data, resolution) {
+    const degree = val(data, 71, NaN), flags = val(data, 70);
+    const knots = data.filter(([code]) => code === 40).map(([, value]) => Number(value));
+    const controls = [];
+    let current = null;
+    for (const [code, value] of data) {
+      if (code === 10) { current = { x: Number(value), y: NaN, weight: 1 }; controls.push(current); }
+      else if (current && code === 20) current.y = Number(value);
+      else if (current && code === 41) current.weight = Number(value);
+    }
+    const n = controls.length;
+    if (!Number.isInteger(degree) || degree < 1 || degree > 5 || n < degree + 1 ||
+        knots.length !== n + degree + 1 || knots.some((k, i) => !finite(k) || i > 0 && k < knots[i - 1]) ||
+        controls.some(p => !finite(p.x) || !finite(p.y) || !(p.weight > 0))) {
+      throw Error('SPLINE con nudos, controles o pesos no compatibles.');
+    }
+    const low = knots[degree], high = knots[n];
+    if (!(high > low)) throw Error('SPLINE sin dominio paramétrico válido.');
+    function evaluate(u) {
+      let span;
+      if (u >= high) span = n - 1;
+      else {
+        let left = degree, right = n;
+        while (left + 1 < right) {
+          const mid = Math.floor((left + right) / 2);
+          if (knots[mid] <= u) left = mid; else right = mid;
+        }
+        span = left;
+      }
+      const d = [];
+      for (let j = 0; j <= degree; j++) {
+        const p = controls[span - degree + j];
+        d.push([p.x * p.weight, p.y * p.weight, p.weight]);
+      }
+      for (let r = 1; r <= degree; r++) for (let j = degree; j >= r; j--) {
+        const i = span - degree + j;
+        const divisor = knots[i + degree - r + 1] - knots[i];
+        const alpha = divisor ? (u - knots[i]) / divisor : 0;
+        d[j] = d[j].map((value, axis) => (1 - alpha) * d[j - 1][axis] + alpha * value);
+      }
+      return { x: d[degree][0] / d[degree][2], y: d[degree][1] / d[degree][2] };
+    }
+    const points = [evaluate(low)];
+    const tolerance = Math.max(resolution, 0.05) / 4;
+    function sample(a, pa, b, pb, depth) {
+      const middle = (a + b) / 2, pm = evaluate(middle);
+      const deviation = Math.hypot(pm.x - (pa.x + pb.x) / 2, pm.y - (pa.y + pb.y) / 2);
+      if (deviation > tolerance && depth < 14) {
+        sample(a, pa, middle, pm, depth + 1);
+        sample(middle, pm, b, pb, depth + 1);
+      } else points.push(pb);
+      if (points.length > 50000) throw Error('SPLINE demasiado compleja para la resolución elegida.');
+    }
+    for (let i = degree; i < n; i++) {
+      if (knots[i + 1] > knots[i]) sample(knots[i], evaluate(knots[i]), knots[i + 1], evaluate(knots[i + 1]), 0);
+    }
+    const closed = (flags & 1) !== 0 || near(points[0], points.at(-1));
+    if (closed && near(points[0], points.at(-1))) points.pop();
+    return { points, closed, degree };
   }
 
   function parseDXF(text, resolution = 0.5) {
@@ -131,12 +194,32 @@
         }, type, layer);
       } else if (type === 'POINT') {
         add({ points: [{ x: val(data, 10, NaN), y: val(data, 20, NaN) }], closed: false }, type, layer);
+      } else if (type === 'SPLINE') {
+        add(spline(data, resolution), type, layer);
       }
     }
     const clean = shapes.filter(shape => shape.points.length >= (shape.type === 'POINT' ? 1 : shape.closed ? 3 : 2)
       && shape.points.every(point => finite(point.x) && finite(point.y)));
-    if (!clean.length) throw Error('No encontré entidades 2D compatibles: LINE, polilíneas, CIRCLE, ARC o POINT.');
-    return clean.map((shape, index) => ({ ...shape, id: index + 1, operation: shape.type === 'POINT' ? 'drill' : 'center' }));
+    if (!clean.length) throw Error('No encontré entidades 2D compatibles: LINE, polilíneas, CIRCLE, ARC, SPLINE o POINT.');
+    function headerCoordinate(name, code) {
+      const start = input.findIndex(([key, value]) => key === 9 && value === name);
+      if (start < 0) return NaN;
+      for (let i = start + 1; i < input.length && input[i][0] !== 9; i++) {
+        if (input[i][0] === code) return Number(input[i][1]);
+      }
+      return NaN;
+    }
+    const sheet = {
+      minX: headerCoordinate('$EXTMIN', 10), minY: headerCoordinate('$EXTMIN', 20),
+      maxX: headerCoordinate('$EXTMAX', 10), maxY: headerCoordinate('$EXTMAX', 20)
+    };
+    return clean.map((shape, index) => {
+      const box = bounds([shape]);
+      const reference = clean.length > 1 && shape.type === 'SPLINE' && shape.degree === 1 &&
+        shape.closed && shape.points.length === 4 &&
+        Object.keys(sheet).every(key => finite(sheet[key]) && Math.abs(box[key] - sheet[key]) < 0.01);
+      return { ...shape, id: index + 1, reference, operation: shape.type === 'POINT' ? 'drill' : reference ? 'skip' : 'center' };
+    });
   }
 
   function bounds(shapes) {
@@ -171,29 +254,27 @@
     return result / 2;
   }
 
-  function offset(shape, distance) {
-    const points = shape.points;
-    if (selfIntersects(points)) throw Error('el contorno tiene auto-intersecciones');
-    const signed = distance * (area(points) >= 0 ? -1 : 1);
-    const segments = points.map((a, i) => {
-      const b = points[(i + 1) % points.length], dx = b.x - a.x, dy = b.y - a.y;
-      const length = Math.hypot(dx, dy);
-      if (length < 1e-8) throw Error('el contorno tiene segmentos de longitud cero');
-      const nx = -dy / length * signed, ny = dx / length * signed;
-      return [{ x: a.x + nx, y: a.y + ny }, { x: b.x + nx, y: b.y + ny }];
-    });
-    const result = points.map((point, i) => {
-      const before = segments[(i + points.length - 1) % points.length], after = segments[i];
-      const hit = intersect(before[0], before[1], after[0], after[1]);
-      if (!hit || Math.hypot(hit.x - point.x, hit.y - point.y) > Math.abs(distance) * 8) {
-        throw Error('la compensación falla en una esquina aguda');
-      }
-      return { x: hit.x, y: hit.y };
-    });
-    if (selfIntersects(result) || Math.sign(area(result)) !== Math.sign(area(points))) {
-      throw Error('la compensación genera una trayectoria inválida');
+  function offset(shape, distance, resolution = 0.5) {
+    if (!ClipperLib) throw Error('el motor de compensación de trayectorias no está disponible');
+    const scale = 10000;
+    const input = [];
+    for (const point of shape.points) {
+      if (Math.abs(point.x) > 1e8 || Math.abs(point.y) > 1e8) throw Error('coordenadas fuera del rango admitido');
+      const rounded = { X: Math.round(point.x * scale), Y: Math.round(point.y * scale) };
+      if (!input.length || input.at(-1).X !== rounded.X || input.at(-1).Y !== rounded.Y) input.push(rounded);
     }
-    return { points: result, closed: true };
+    if (input.length > 1 && input[0].X === input.at(-1).X && input[0].Y === input.at(-1).Y) input.pop();
+    if (input.length < 3 || Math.abs(ClipperLib.Clipper.Area(input)) < 1) throw Error('el contorno no tiene área válida');
+    if (ClipperLib.Clipper.Area(input) < 0) input.reverse();
+    const engine = new ClipperLib.ClipperOffset(2, Math.max(0.02, resolution / 4) * scale);
+    engine.AddPath(input, ClipperLib.JoinType.jtRound, ClipperLib.EndType.etClosedPolygon);
+    const output = new ClipperLib.Paths();
+    engine.Execute(output, distance * scale);
+    if (!output.length) throw Error('la fresa no cabe en este contorno con el desplazamiento elegido');
+    return output.map(path => ({
+      points: path.map(point => ({ x: point.X / scale, y: point.Y / scale })),
+      closed: true
+    })).filter(path => path.points.length >= 3);
   }
 
   function plan(shapes, settings) {
@@ -228,7 +309,9 @@
           if (operation === 'inside' && shape.type === 'CIRCLE' && shape.radius * 2 <= settings.diameter) {
             throw Error('la fresa no cabe dentro del círculo; usa «Perforar» si coincide su diámetro');
           }
-          paths.push({ ...offset(shape, (operation === 'outside' ? 1 : -1) * settings.diameter / 2), id: shape.id, operation });
+          for (const contour of offset(shape, (operation === 'outside' ? 1 : -1) * settings.diameter / 2, settings.resolution)) {
+            paths.push({ ...contour, id: shape.id, operation });
+          }
         } else if (operation === 'center') {
           if (shape.type === 'POINT') throw Error('un POINT solo admite «Perforar»');
           paths.push({ id: shape.id, operation, points: shape.points, closed: shape.closed });
@@ -241,21 +324,34 @@
     }
     const rank = { drill: 0, inside: 1, center: 2, outside: 3 };
     paths.sort((a, b) => rank[a.operation] - rank[b.operation] || a.id - b.id);
+    const byId = new Map(geometry.map(shape => [shape.id, shape]));
+    for (const path of paths) {
+      const source = byId.get(path.id);
+      path.depth = source.depth;
+      path.stepdown = source.stepdown;
+    }
     return { geometry, paths };
   }
 
   function gcode(planResult, settings) {
     const { paths } = planResult;
     if (!paths.length) throw Error('Selecciona al menos una trayectoria para generar G-code.');
-    const passes = Math.ceil(settings.depth / settings.stepdown);
+    let maxPasses = 0;
     const output = [
       '(DXF CNC - verificar en simulador y hacer prueba en vacio)',
+      '(SIN PESTANAS NI RAMPAS; verificar sujecion de cortes exteriores)',
       'G21', 'G90', 'G17', 'G94', `G0 Z${fmt(settings.safez)}`, `M3 S${Math.round(settings.spindle)}`
     ];
     for (const path of paths) {
+      const depth = path.depth == null ? settings.depth : path.depth;
+      const stepdown = path.stepdown == null ? settings.stepdown : path.stepdown;
+      if (!(depth > 0) || !(stepdown > 0)) throw Error('Entidad #' + path.id + ': profundidad y paso Z deben ser mayores que cero.');
+      const passes = Math.ceil(depth / stepdown);
+      if (passes > 250) throw Error('Entidad #' + path.id + ': demasiadas pasadas Z.');
+      maxPasses = Math.max(maxPasses, passes);
       output.push(`(Entidad ${path.id}: ${path.operation})`);
       for (let pass = 1; pass <= passes; pass++) {
-        const z = -Math.min(pass * settings.stepdown, settings.depth);
+        const z = -Math.min(pass * stepdown, depth);
         const start = path.points[0];
         output.push(`(Pasada ${pass}/${passes} Z${fmt(z)})`);
         output.push(`G0 Z${fmt(settings.safez)}`);
@@ -273,7 +369,7 @@
     output.push('M5');
     if (settings.returnHome) output.push('G0 X0 Y0');
     output.push('M2');
-    return { text: output.join('\n') + '\n', lineCount: output.length, passes };
+    return { text: output.join('\n') + '\n', lineCount: output.length, passes: maxPasses };
   }
 
   return { parseDXF, bounds, plan, gcode, fmt };
